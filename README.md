@@ -67,6 +67,12 @@ Requirements: Xcode, [XcodeGen](https://github.com/yonaskolb/XcodeGen), a real i
 4. Pick your iPhone and press Run.
 5. In the app, open **Advanced** and set the server address to `http://<your Mac's IP>:8080`. The phone and Mac must be on the same Wi-Fi.
 
+## Changes
+
+- **Digital ID.** The home screen lists your IDs. Add passport issues a Digital ID bound to a Secure Enclave key. Details stay masked until Face ID. Present ID shares only the fields a verifier asks for.
+- **Encryption.** Passport data is sent with HPKE, and the server key is pinned in the app.
+- **First version.** Scan the MRZ, read the chip over NFC, and check it on the server.
+
 ## Libraries
 
 - [NFCPassportReader](https://github.com/AndyQ/NFCPassportReader): chip access (BAC/PACE) and reading data groups
