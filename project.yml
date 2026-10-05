@@ -31,6 +31,7 @@ targets:
           - UIInterfaceOrientationPortrait
         NFCReaderUsageDescription: Uses NFC to read passport data from the ePassport chip.
         NSCameraUsageDescription: Scans the MRZ on the passport's photo page to unlock the NFC chip.
+        NSFaceIDUsageDescription: Uses Face ID to protect your Digital ID.
         NSLocalNetworkUsageDescription: Sends passport data to the verification server on your local network.
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true

@@ -3,9 +3,12 @@ import SwiftUI
 /// App entry point.
 @main
 struct PassportReaderApp: App {
+    @StateObject private var store = WalletStore()
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            WalletView()
+                .environmentObject(store)
         }
     }
 }

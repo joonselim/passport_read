@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import NFCPassportReader
+import CryptoKit
 import OSLog
 
 private let log = Logger(subsystem: "com.joonselim.PassportReader", category: "reader")
@@ -42,8 +43,8 @@ struct PassportResult {
         dg2Bytes = model.getDataGroup(.DG2)?.data ?? []
     }
 
-    /// JSON body for the server: {dg1, sod, dg2} as Base64.
-    func exportJSON() -> Data {
+    /// The chip files as Base64: {dg1, sod, dg2}.
+    func exportFields() -> [String: String] {
         var dict: [String: String] = [
             "dg1": Data(dg1Bytes).base64EncodedString(),
             "sod": Data(sodBytes).base64EncodedString(),
@@ -51,7 +52,26 @@ struct PassportResult {
         if !dg2Bytes.isEmpty {
             dict["dg2"] = Data(dg2Bytes).base64EncodedString()
         }
-        return (try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys])) ?? Data()
+        return dict
+    }
+
+    /// JSON body for the server: {dg1, sod, dg2} as Base64.
+    func exportJSON() -> Data {
+        (try? JSONSerialization.data(withJSONObject: exportFields(), options: [.prettyPrinted, .sortedKeys])) ?? Data()
+    }
+
+    /// Issuance body: the chip files, the device public key, the challenge, and the device's signature over it.
+    func issuanceJSON(devicePublicKey: Data, challenge: Data, proof: Data) -> Data {
+        var dict = exportFields()
+        dict["devicePublicKey"] = devicePublicKey.base64EncodedString()
+        dict["challenge"] = challenge.base64EncodedString()
+        dict["proof"] = proof.base64EncodedString()
+        return (try? JSONSerialization.data(withJSONObject: dict)) ?? Data()
+    }
+
+    /// What the device signs to prove it holds the key: CBOR ["IssuanceRequest", challenge, SHA-256(SOD)].
+    func proofInput(challenge: Data) -> Data {
+        CBOR.array([.text("IssuanceRequest"), .bytes(challenge), .bytes(Data(SHA256.hash(data: Data(sodBytes))))]).encoded()
     }
 
     /// Saves the JSON to a temp file for the share sheet.
@@ -82,10 +102,12 @@ final class PassportReaderViewModel: ObservableObject {
     @Published var readAttempts = 0
 
     // Verification (Java server)
-    @AppStorage("serverURL") var serverURL = "http://192.168.0.10:8080"
+    @AppStorage("serverURL") var serverURL = VerificationClient.defaultServerURL
     @Published var isVerifying = false
     @Published var verification: VerifyResponse?
     @Published var stages: [PipelineStage: StageState] = [:]
+    /// The Digital ID added in this session, if any.
+    @Published var addedID: StoredID?
 
     private let reader = PassportReader()
 
@@ -131,6 +153,7 @@ final class PassportReaderViewModel: ObservableObject {
         readAttempts += 1
         result = nil
         verification = nil
+        addedID = nil
         stages = [:]
         set(.nfcAuth, .running)
 
@@ -189,30 +212,19 @@ final class PassportReaderViewModel: ObservableObject {
         }
     }
 
-    /// Steps 3-7: encrypt the JSON, ping the server, send it, show the results.
-    func verify(_ res: PassportResult) async {
+    /// Steps 3-10: get a challenge, make the device key, encrypt, let the server check the passport
+    /// and issue a Digital ID, then save it on this iPhone.
+    func verifyAndIssue(_ res: PassportResult, store: WalletStore) async {
         isVerifying = true
         defer { isVerifying = false }
         verification = nil
-        for st in [PipelineStage.buildPayload, .serverReachable, .integrity, .signature, .issuerTrust] { set(st, .pending) }
+        addedID = nil
+        for st in PipelineStage.allCases where st.rawValue >= PipelineStage.serverReachable.rawValue { set(st, .pending) }
 
-        set(.buildPayload, .running)
-        let body = res.exportJSON()
-        guard !body.isEmpty, !res.sodBytes.isEmpty else {
-            set(.buildPayload, .failed("EMPTY"))
+        guard !res.sodBytes.isEmpty else {
             fail("Nothing to verify: SOD is empty.")
             return
         }
-        let sealed: SealedRequest
-        do {
-            sealed = try VerificationClient.seal(body)
-        } catch {
-            set(.buildPayload, .failed("KEY"))
-            fail(error.localizedDescription)
-            return
-        }
-        set(.buildPayload, .done("\(sealed.body.count) B"))
-
         let client: VerificationClient
         do {
             client = try VerificationClient(baseURLString: serverURL)
@@ -222,10 +234,13 @@ final class PassportReaderViewModel: ObservableObject {
             return
         }
 
+        // 3. Server reachable, same key as pinned, and a fresh challenge.
         set(.serverReachable, .running)
         statusMessage = "Contacting \(client.baseURL.host() ?? "server")…"
+        let challenge: Data
         do {
             try await client.ping()
+            challenge = try await client.challenge()
         } catch VerificationError.keyMismatch(let server, let app) {
             set(.serverReachable, .failed("KEY"))
             fail(VerificationError.keyMismatch(server: server, app: app).localizedDescription)
@@ -237,30 +252,94 @@ final class PassportReaderViewModel: ObservableObject {
         }
         set(.serverReachable, .done("OK"))
 
-        set(.integrity, .running); set(.signature, .running); set(.issuerTrust, .running)
-        statusMessage = "Verifying on server…"
+        // 4. New Secure Enclave key, protected by Face ID; sign the challenge with it.
+        set(.deviceKey, .running)
+        statusMessage = "Confirm with Face ID…"
+        let key: SecureEnclave.P256.Signing.PrivateKey
+        let proof: Data
         do {
-            let resp = try await client.verify(sealed)
-            verification = resp
-            set(.integrity, resp.checks.dataIntegrity.status == "MATCH" ? .done("MATCH") : .failed(resp.checks.dataIntegrity.status))
-            set(.signature, resp.checks.signature.status == "VALID" ? .done("VALID") : .failed(resp.checks.signature.status))
-            switch resp.checks.issuerTrust.status {
-            case "TRUSTED": set(.issuerTrust, .done("TRUSTED"))
-            case "UNVERIFIED": set(.issuerTrust, .warning("UNVERIFIED"))
-            default: set(.issuerTrust, .failed(resp.checks.issuerTrust.status))
-            }
-            statusMessage = "Overall: \(resp.overall)"
-            log.info("Verification overall=\(resp.overall)")
+            let context = try await DeviceKey.authenticate(reason: "Add your passport as a Digital ID on this iPhone")
+            key = try DeviceKey.create(context: context)
+            proof = try DeviceKey.sign(res.proofInput(challenge: challenge), with: key)
         } catch {
-            for st in [PipelineStage.integrity, .signature, .issuerTrust] { set(st, .failed("ERROR")) }
+            set(.deviceKey, .failed("CANCELLED"))
             fail(error.localizedDescription)
+            return
+        }
+        set(.deviceKey, .done("P-256"))
+
+        // 5. Encrypt everything for the server.
+        set(.buildPayload, .running)
+        let sealed: SealedRequest
+        do {
+            let body = res.issuanceJSON(devicePublicKey: key.publicKey.x963Representation, challenge: challenge, proof: proof)
+            sealed = try VerificationClient.seal(body)
+        } catch {
+            set(.buildPayload, .failed("KEY"))
+            fail(error.localizedDescription)
+            return
+        }
+        set(.buildPayload, .done("\(sealed.body.count) B"))
+
+        // 6-9. Server checks the passport and, if it passes, signs a Digital ID.
+        for st in [PipelineStage.integrity, .signature, .issuerTrust, .issueID] { set(st, .running) }
+        statusMessage = "Verifying on server…"
+        let resp: IssueResponse
+        do {
+            resp = try await client.issue(sealed)
+        } catch {
+            for st in [PipelineStage.integrity, .signature, .issuerTrust, .issueID] { set(st, .failed("ERROR")) }
+            fail(error.localizedDescription)
+            return
+        }
+        show(resp.verification)
+        guard let credential = resp.credential else {
+            set(.issueID, .failed("NOT ISSUED"))
+            statusMessage = "No Digital ID: \(resp.reason ?? "passport check did not pass")."
+            return
+        }
+        set(.issueID, .done("SIGNED"))
+
+        // 10. Save on this iPhone.
+        set(.saveID, .running)
+        do {
+            let stored = try StoredID(
+                id: UUID(),
+                docType: credential.docType,
+                issuerAuth: Self.base64(credential.issuerAuth),
+                items: credential.items.map {
+                    StoredID.Item(namespace: $0.namespace, elementIdentifier: $0.elementIdentifier, bytes: try Self.base64($0.bytes))
+                },
+                deviceKey: key.dataRepresentation,
+                addedAt: Date())
+            try store.add(stored)
+            addedID = stored
+            set(.saveID, .done("KEYCHAIN"))
+            statusMessage = "Digital ID added."
+            log.info("Digital ID added")
+        } catch {
+            set(.saveID, .failed("ERROR"))
+            fail("Could not save the Digital ID: \(error.localizedDescription)")
         }
     }
 
-    /// Runs only the server part again with the last read.
-    func reverify() async {
-        guard let res = result else { return }
-        await verify(res)
+    /// Maps the server's three passport checks onto steps 6-8.
+    private func show(_ v: VerifyResponse) {
+        verification = v
+        set(.integrity, v.checks.dataIntegrity.status == "MATCH" ? .done("MATCH") : .failed(v.checks.dataIntegrity.status))
+        set(.signature, v.checks.signature.status == "VALID" ? .done("VALID") : .failed(v.checks.signature.status))
+        switch v.checks.issuerTrust.status {
+        case "TRUSTED": set(.issuerTrust, .done("TRUSTED"))
+        case "UNVERIFIED": set(.issuerTrust, .warning("UNVERIFIED"))
+        default: set(.issuerTrust, .failed(v.checks.issuerTrust.status))
+        }
+        log.info("Verification overall=\(v.overall)")
+    }
+
+    /// Base64 text to bytes, or an error.
+    private static func base64(_ s: String) throws -> Data {
+        guard let d = Data(base64Encoded: s) else { throw VerificationError.badResponse("bad Base64") }
+        return d
     }
 
     /// Shows an error popup.

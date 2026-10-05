@@ -81,6 +81,63 @@ enum ServerKey {
     }
 }
 
+/// Issuance answer: the passport check, and the Digital ID if it passed.
+struct IssueResponse: Decodable {
+    let verification: VerifyResponse
+    let credential: CredentialPayload?
+    let reason: String?
+}
+
+/// A Digital ID as the server sends it (all Base64).
+struct CredentialPayload: Decodable {
+    let docType: String
+    let issuerAuth: String
+    let items: [ItemPayload]
+}
+
+/// One signed field, as JSON.
+struct ItemPayload: Codable {
+    let namespace: String
+    let elementIdentifier: String
+    let bytes: String
+}
+
+/// What the verifier asks for.
+struct VerifierRequest: Decodable {
+    let nonce: String
+    let docType: String
+    let elements: [String]
+    let verifier: String
+    let purpose: String
+}
+
+/// The verifier's decision and the fields it received.
+struct PresentResult: Decodable {
+    let result: String
+    let checks: [String: String]
+    let issuer: String?
+    let disclosed: [String: DisclosedValue]
+}
+
+/// A received field: text (Base64 for the photo) or true/false.
+enum DisclosedValue: Decodable {
+    case text(String)
+    case bool(Bool)
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if let b = try? c.decode(Bool.self) { self = .bool(b) } else { self = .text(try c.decode(String.self)) }
+    }
+
+    /// Value for display.
+    var display: String {
+        switch self {
+        case .text(let s): return s
+        case .bool(let b): return b ? "Yes" : "No"
+        }
+    }
+}
+
 /// Error JSON from the server (400 / 422).
 private struct ApiError: Decodable {
     let error: String?
@@ -110,6 +167,9 @@ enum VerificationError: LocalizedError {
 
 /// Talks to the Java server.
 struct VerificationClient {
+    /// Placeholder address. Set the real one in the app under Advanced.
+    static let defaultServerURL = "http://192.168.0.10:8080"
+
     let baseURL: URL
 
     /// Checks that the server address is a valid URL.
@@ -155,9 +215,54 @@ struct VerificationClient {
         return SealedRequest(body: body, responseKey: responseKey)
     }
 
-    /// POST /verify-sealed with the encrypted body, then decrypt and decode the answer.
+    /// POST /verify-sealed: check the passport only.
     func verify(_ sealed: SealedRequest) async throws -> VerifyResponse {
-        var req = URLRequest(url: baseURL.appending(path: "api/v1/passport/verify-sealed"))
+        try decodeAnswer(VerifyResponse.self, from: try await send(sealed, to: "api/v1/passport/verify-sealed"))
+    }
+
+    /// GET /issuer/challenge: a one-time value to sign with the device key.
+    func challenge() async throws -> Data {
+        struct Answer: Decodable { let challenge: String }
+        let answer: Answer = try await getJSON("api/v1/issuer/challenge")
+        guard let data = Data(base64Encoded: answer.challenge) else { throw VerificationError.badResponse("challenge") }
+        return data
+    }
+
+    /// POST /issuer/issue-sealed: check the passport and get a Digital ID if it passes.
+    func issue(_ sealed: SealedRequest) async throws -> IssueResponse {
+        try decodeAnswer(IssueResponse.self, from: try await send(sealed, to: "api/v1/issuer/issue-sealed"))
+    }
+
+    /// GET /verifier/request?purpose=...: what the demo verifier wants.
+    func verifierRequest(purpose: String) async throws -> VerifierRequest {
+        try await getJSON("api/v1/verifier/request", query: [URLQueryItem(name: "purpose", value: purpose)])
+    }
+
+    /// POST /verifier/present-sealed: show the chosen fields to the verifier.
+    func present(_ sealed: SealedRequest) async throws -> PresentResult {
+        try decodeAnswer(PresentResult.self, from: try await send(sealed, to: "api/v1/verifier/present-sealed"))
+    }
+
+    /// Plain GET returning JSON.
+    private func getJSON<T: Decodable>(_ path: String, query: [URLQueryItem] = []) async throws -> T {
+        var url = baseURL.appending(path: path)
+        if !query.isEmpty { url.append(queryItems: query) }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 10
+        let data: Data
+        let resp: URLResponse
+        do {
+            (data, resp) = try await URLSession.shared.data(for: req)
+        } catch {
+            throw VerificationError.unreachable(error.localizedDescription)
+        }
+        try Self.check(resp, data)
+        return try decodeAnswer(T.self, from: data)
+    }
+
+    /// POSTs an encrypted body and returns the decrypted answer.
+    private func send(_ sealed: SealedRequest, to path: String) async throws -> Data {
+        var req = URLRequest(url: baseURL.appending(path: path))
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = sealed.body
@@ -170,21 +275,34 @@ struct VerificationClient {
         } catch {
             throw VerificationError.unreachable(error.localizedDescription)
         }
+        try Self.check(resp, data)
+        do {
+            let wrapper = try JSONDecoder().decode([String: String].self, from: data)
+            guard let b64 = wrapper["ciphertext"], let combined = Data(base64Encoded: b64) else {
+                throw VerificationError.badResponse("no ciphertext")
+            }
+            return try ChaChaPoly.open(ChaChaPoly.SealedBox(combined: combined), using: sealed.responseKey)
+        } catch let e as VerificationError {
+            throw e
+        } catch {
+            throw VerificationError.badResponse(error.localizedDescription)
+        }
+    }
+
+    /// Throws the server's error message for non-2xx answers.
+    private static func check(_ resp: URLResponse, _ data: Data) throws {
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(code) else {
             let apiErr = try? JSONDecoder().decode(ApiError.self, from: data)
             let msg = apiErr?.errors?.joined(separator: "; ") ?? apiErr?.error ?? String(data: data, encoding: .utf8) ?? ""
             throw VerificationError.server(code, msg)
         }
+    }
+
+    /// JSON decoding with a readable error.
+    private func decodeAnswer<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
         do {
-            let wrapper = try JSONDecoder().decode([String: String].self, from: data)
-            guard let b64 = wrapper["ciphertext"], let combined = Data(base64Encoded: b64) else {
-                throw VerificationError.badResponse("no ciphertext")
-            }
-            let plain = try ChaChaPoly.open(ChaChaPoly.SealedBox(combined: combined), using: sealed.responseKey)
-            return try JSONDecoder().decode(VerifyResponse.self, from: plain)
-        } catch let e as VerificationError {
-            throw e
+            return try JSONDecoder().decode(type, from: data)
         } catch {
             throw VerificationError.badResponse(error.localizedDescription)
         }

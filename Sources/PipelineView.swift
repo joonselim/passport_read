@@ -1,14 +1,17 @@
 import SwiftUI
 
-/// The 7 steps, in the order they run.
+/// The steps of adding a passport, in the order they run.
 enum PipelineStage: Int, CaseIterable, Identifiable {
     case nfcAuth = 1       // BAC/PACE with the chip
     case readDataGroups    // DG1 / DG2 / SOD
+    case serverReachable   // GET /health, key check, challenge
+    case deviceKey         // Secure Enclave key, signs the challenge
     case buildPayload      // JSON, encrypted with HPKE
-    case serverReachable   // GET /health
     case integrity         // DG hashes vs SOD
     case signature         // SOD signature vs DS cert
     case issuerTrust       // DS cert chains to CSCA
+    case issueID           // server signs the Digital ID
+    case saveID            // saved in the Keychain
 
     var id: Int { rawValue }
 
@@ -17,11 +20,14 @@ enum PipelineStage: Int, CaseIterable, Identifiable {
         switch self {
         case .nfcAuth: return "NFC access"
         case .readDataGroups: return "Read data groups"
-        case .buildPayload: return "Encrypt payload"
         case .serverReachable: return "Server reachable"
+        case .deviceKey: return "Device key"
+        case .buildPayload: return "Encrypt payload"
         case .integrity: return "Data integrity"
         case .signature: return "SOD signature"
         case .issuerTrust: return "Issuer trust"
+        case .issueID: return "Issue Digital ID"
+        case .saveID: return "Save to iPhone"
         }
     }
 
@@ -30,16 +36,21 @@ enum PipelineStage: Int, CaseIterable, Identifiable {
         switch self {
         case .nfcAuth: return "BAC/PACE with MRZ key"
         case .readDataGroups: return "DG1 · DG2 · SOD"
+        case .serverReachable: return "Health, key check, challenge"
+        case .deviceKey: return "Secure Enclave P-256 · Face ID"
         case .buildPayload: return "HPKE · X25519 · ChaChaPoly"
-        case .serverReachable: return "GET /health + key check"
         case .integrity: return "DG hashes vs SOD"
         case .signature: return "DS certificate → SOD"
         case .issuerTrust: return "DS certificate → CSCA"
+        case .issueID: return "mdoc signed by issuer, bound to device key"
+        case .saveID: return "Keychain, this iPhone only"
         }
     }
 
-    /// Steps 1-3 run on the phone, 4-7 on the server.
-    var isServerSide: Bool { rawValue >= PipelineStage.serverReachable.rawValue }
+    /// True for steps the server does.
+    var isServerSide: Bool {
+        [.serverReachable, .integrity, .signature, .issuerTrust, .issueID].contains(self)
+    }
 }
 
 /// State of one step.
@@ -58,10 +69,8 @@ struct PipelineView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ForEach(PipelineStage.allCases) { stage in
-                if stage == .serverReachable {
-                    sectionLabel("Java server")
-                } else if stage == .nfcAuth {
-                    sectionLabel("iPhone")
+                if stage == .nfcAuth || stage.isServerSide != PipelineStage(rawValue: stage.rawValue - 1)?.isServerSide {
+                    sectionLabel(stage.isServerSide ? "Java server" : "iPhone")
                 }
                 row(stage, states[stage] ?? .pending)
             }

@@ -1,8 +1,10 @@
 import SwiftUI
 import CoreNFC
 
-/// Main screen: scan, read the chip, show the passport, verify with the server.
-struct ContentView: View {
+/// Add passport: scan, read the chip, verify with the server, and save the issued Digital ID.
+struct AddPassportView: View {
+    @EnvironmentObject private var store: WalletStore
+    @Environment(\.dismiss) private var dismiss
     @StateObject private var vm = PassportReaderViewModel()
     @State private var showScanner = false
     @State private var showManualEntry = false
@@ -77,16 +79,16 @@ struct ContentView: View {
                         }
                     }
 
-                    // Step 3: verify on the server.
-                    if vm.verification == nil && !vm.isVerifying {
+                    // Step 3: verify on the server and get a Digital ID.
+                    if vm.addedID == nil && !vm.isVerifying && vm.stages[.serverReachable] == nil {
                         Section {
                             Button {
-                                Task { await vm.reverify() }
+                                Task { await vm.verifyAndIssue(result, store: store) }
                             } label: {
-                                HStack { Spacer(); Label("Verify with server", systemImage: "checkmark.shield").bold(); Spacer() }
+                                HStack { Spacer(); Label("Verify and add to iPhone", systemImage: "checkmark.shield").bold(); Spacer() }
                             }
                         } footer: {
-                            Text("Encrypts DG1, DG2 and SOD with the server's key (HPKE) and sends them to \(vm.serverURL).")
+                            Text("Encrypts DG1, DG2 and SOD with the server's key (HPKE) and sends them to \(vm.serverURL). If the passport passes, the server issues a Digital ID bound to this iPhone.")
                         }
                     }
                 }
@@ -114,8 +116,27 @@ struct ContentView: View {
                                 Text("issued by " + (ds.issuer ?? "-")).font(.caption.monospaced()).foregroundStyle(.secondary)
                             }
                         }
-                        Button("Re-verify") { Task { await vm.reverify() } }
-                            .disabled(vm.isVerifying || vm.isReading)
+                    }
+                }
+
+                // Done: the ID is saved.
+                if let added = vm.addedID {
+                    Section {
+                        Label("\(added.claims.fullName) was added to this iPhone.", systemImage: "checkmark.seal.fill")
+                            .foregroundStyle(.green)
+                        Button {
+                            dismiss()
+                        } label: {
+                            HStack { Spacer(); Text("Done").bold(); Spacer() }
+                        }
+                    }
+                } else if let result = vm.result, !vm.isVerifying, vm.stages[.serverReachable] != nil {
+                    Section {
+                        Button {
+                            Task { await vm.verifyAndIssue(result, store: store) }
+                        } label: {
+                            HStack { Spacer(); Label("Try again", systemImage: "arrow.clockwise"); Spacer() }
+                        }
                     }
                 }
 
@@ -135,7 +156,14 @@ struct ContentView: View {
                     Text("Phone and Mac must be on the same Wi-Fi.")
                 }
             }
-            .navigationTitle("ePassport Reader")
+            .navigationTitle("Add passport")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") { dismiss() }
+                        .disabled(vm.isReading || vm.isVerifying)
+                }
+            }
             .alert("Failed", isPresented: $vm.showError) {
                 Button("OK", role: .cancel) {}
             } message: {
@@ -281,5 +309,5 @@ private struct LabeledTextField: View {
 }
 
 #Preview {
-    ContentView()
+    AddPassportView().environmentObject(WalletStore())
 }
