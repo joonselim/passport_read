@@ -4,8 +4,8 @@ An iPhone app that reads an ePassport chip over NFC and asks a server whether th
 
 ## Why
 
-To mimic how Apple Wallet adds a Digital ID from a passport.
-The phone scans the passport and reads its chip. A server checks that the data was really signed by the issuing country.
+A toy project to understand the standards behind wallet identity, mainly ICAO 9303 (ePassports).
+The phone reads the passport chip, and a separate server checks that the data was signed by the issuing country.
 
 ## You need two repos
 
