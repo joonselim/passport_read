@@ -4,7 +4,7 @@ import SwiftUI
 enum PipelineStage: Int, CaseIterable, Identifiable {
     case nfcAuth = 1       // BAC/PACE with the chip
     case readDataGroups    // DG1 / DG2 / SOD
-    case buildPayload      // Base64 JSON
+    case buildPayload      // JSON, encrypted with HPKE
     case serverReachable   // GET /health
     case integrity         // DG hashes vs SOD
     case signature         // SOD signature vs DS cert
@@ -17,7 +17,7 @@ enum PipelineStage: Int, CaseIterable, Identifiable {
         switch self {
         case .nfcAuth: return "NFC access"
         case .readDataGroups: return "Read data groups"
-        case .buildPayload: return "Build JSON"
+        case .buildPayload: return "Encrypt payload"
         case .serverReachable: return "Server reachable"
         case .integrity: return "Data integrity"
         case .signature: return "SOD signature"
@@ -30,8 +30,8 @@ enum PipelineStage: Int, CaseIterable, Identifiable {
         switch self {
         case .nfcAuth: return "BAC/PACE with MRZ key"
         case .readDataGroups: return "DG1 · DG2 · SOD"
-        case .buildPayload: return "Base64 {dg1, dg2, sod}"
-        case .serverReachable: return "GET /api/v1/passport/health"
+        case .buildPayload: return "HPKE · X25519 · ChaChaPoly"
+        case .serverReachable: return "GET /health + key check"
         case .integrity: return "DG hashes vs SOD"
         case .signature: return "DS certificate → SOD"
         case .issuerTrust: return "DS certificate → CSCA"

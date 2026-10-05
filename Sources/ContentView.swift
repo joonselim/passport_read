@@ -86,7 +86,7 @@ struct ContentView: View {
                                 HStack { Spacer(); Label("Verify with server", systemImage: "checkmark.shield").bold(); Spacer() }
                             }
                         } footer: {
-                            Text("Sends DG1, DG2 and SOD to \(vm.serverURL).")
+                            Text("Encrypts DG1, DG2 and SOD with the server's key (HPKE) and sends them to \(vm.serverURL).")
                         }
                     }
                 }

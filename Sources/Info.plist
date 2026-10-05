@@ -20,17 +20,19 @@
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<key>HPKEServerPublicKey</key>
+	<string>BhPJ5xDTbjAsCm8FqaTwKwVtiiXLZUA62H4BCdf5vDE=</string>
 	<key>NFCReaderUsageDescription</key>
 	<string>Uses NFC to read passport data from the ePassport chip.</string>
-	<key>NSCameraUsageDescription</key>
-	<string>Scans the MRZ on the passport's photo page to unlock the NFC chip.</string>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>Sends passport data to the verification server on your local network.</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSCameraUsageDescription</key>
+	<string>Scans the MRZ on the passport's photo page to unlock the NFC chip.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Sends passport data to the verification server on your local network.</string>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations</key>

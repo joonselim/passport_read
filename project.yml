@@ -34,6 +34,8 @@ targets:
         NSLocalNetworkUsageDescription: Sends passport data to the verification server on your local network.
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
+        # Public key of your passport_validate server (GET /health -> hpkePublicKey)
+        HPKEServerPublicKey: "BhPJ5xDTbjAsCm8FqaTwKwVtiiXLZUA62H4BCdf5vDE="
         com.apple.developer.nfc.readersession.iso7816.select-identifiers:
           - A0000002471001
           - A0000002472001

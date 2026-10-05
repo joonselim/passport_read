@@ -189,7 +189,7 @@ final class PassportReaderViewModel: ObservableObject {
         }
     }
 
-    /// Steps 3-7: build the JSON, ping the server, send it, show the results.
+    /// Steps 3-7: encrypt the JSON, ping the server, send it, show the results.
     func verify(_ res: PassportResult) async {
         isVerifying = true
         defer { isVerifying = false }
@@ -203,7 +203,15 @@ final class PassportReaderViewModel: ObservableObject {
             fail("Nothing to verify: SOD is empty.")
             return
         }
-        set(.buildPayload, .done("\(body.count) B"))
+        let sealed: SealedRequest
+        do {
+            sealed = try VerificationClient.seal(body)
+        } catch {
+            set(.buildPayload, .failed("KEY"))
+            fail(error.localizedDescription)
+            return
+        }
+        set(.buildPayload, .done("\(sealed.body.count) B"))
 
         let client: VerificationClient
         do {
@@ -218,6 +226,10 @@ final class PassportReaderViewModel: ObservableObject {
         statusMessage = "Contacting \(client.baseURL.host() ?? "server")…"
         do {
             try await client.ping()
+        } catch VerificationError.keyMismatch(let server, let app) {
+            set(.serverReachable, .failed("KEY"))
+            fail(VerificationError.keyMismatch(server: server, app: app).localizedDescription)
+            return
         } catch {
             set(.serverReachable, .failed("OFFLINE"))
             fail(error.localizedDescription)
@@ -228,7 +240,7 @@ final class PassportReaderViewModel: ObservableObject {
         set(.integrity, .running); set(.signature, .running); set(.issuerTrust, .running)
         statusMessage = "Verifying on server…"
         do {
-            let resp = try await client.verify(body: body)
+            let resp = try await client.verify(sealed)
             verification = resp
             set(.integrity, resp.checks.dataIntegrity.status == "MATCH" ? .done("MATCH") : .failed(resp.checks.dataIntegrity.status))
             set(.signature, resp.checks.signature.status == "VALID" ? .done("VALID") : .failed(resp.checks.signature.status))
